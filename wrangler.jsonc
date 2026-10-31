@@ -2,7 +2,7 @@
   // Cloudflare Workers, static assets only: no Worker code, no bindings.
   // `pnpm run deploy:cloudflare` builds and deploys. Rename before deploying.
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "morong",
+  "name": "rizal-province",
   "compatibility_date": "2026-10-01",
   "assets": {
     "directory": "./dist",
