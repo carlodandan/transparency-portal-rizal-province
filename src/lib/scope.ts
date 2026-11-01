@@ -14,6 +14,91 @@ import { DATASET_KEYS, type DatasetKey, type Exclusion, type PortalConfig } from
 import type { Client, Params } from '../api/client';
 import type { BridgeGroup, Disclaimer, Meta, OfficeLens, ProjectRow } from '../api/types';
 import { BRIDGE_GROUPS } from '../api/types';
+import psgc from '../data/psgc.json';
+import { resolveParentProvince } from './gaa';
+
+interface PsgcProvince {
+  name: string;
+  code: string;
+  region_key: string;
+  cities: string[];
+  municipalities: string[];
+  lgus: string[];
+}
+
+interface PsgcData {
+  provinces: Record<string, PsgcProvince>;
+  namesakeTowns: Record<string, string[]>;
+}
+
+const psgcTyped = psgc as PsgcData;
+
+const NCR_CITIES = [
+  'manila', 'taguig', 'pasig', 'makati', 'quezon city', 'caloocan', 'valenzuela',
+  'marikina', 'las piñas', 'muntinlupa', 'parañaque', 'pasay', 'mandaluyong',
+  'navotas', 'malabon', 'pateros'
+];
+
+export function isProjectForScope(title: string, config: PortalConfig, placeLabel: string): boolean {
+  if (!title) return true;
+  const lower = title.toLowerCase();
+  const placeLower = placeLabel.toLowerCase();
+
+  // 1. Must contain the place as a distinct word
+  if (!new RegExp(`\\b${placeLower}\\b`, 'i').test(lower)) {
+    return false;
+  }
+
+  // 2. Parent province resolution
+  const parent = resolveParentProvince(placeLabel, config);
+  if (!parent) return true;
+
+  const parentLower = parent.toLowerCase();
+  const parentProvObj = psgcTyped.provinces[parent];
+  const ourLgus = new Set((parentProvObj?.lgus || []).map((l) => l.toLowerCase()));
+  ourLgus.add(parentLower);
+  if (parentLower === 'rizal') {
+    ourLgus.add('montalban');
+    ourLgus.add('jalajala');
+  }
+
+  const otherOurLgus = new Set([...ourLgus].filter((l) => l !== placeLower));
+  const hasOurProvince = new RegExp(`(,\\s*${parentLower}|\\bprovince of ${parentLower}\\b|\\b${parentLower} province\\b)`, 'i').test(lower);
+  const hasOurTowns = [...otherOurLgus].some((l) => new RegExp(`\\b${l}\\b`, 'i').test(lower));
+  const hasOurAffirmation = hasOurProvince || hasOurTowns;
+
+  const otherProvinces = Object.keys(psgcTyped.provinces)
+    .filter((k) => k.toLowerCase() !== parentLower)
+    .map((k) => k.toLowerCase());
+
+  // Foreign province or NCR city check:
+  const foreignProv = otherProvinces.find((prov) => new RegExp(`\\b${prov}\\b`, 'i').test(lower));
+  const foreignNcr = NCR_CITIES.find((city) => new RegExp(`\\b${city}\\b`, 'i').test(lower));
+
+  if ((foreignProv || foreignNcr) && !hasOurAffirmation) {
+    return false;
+  }
+
+  // Foreign municipality check (only when portal is city/municipality):
+  if (config.kind === 'city' || config.kind === 'municipality') {
+    for (const provName of Object.keys(psgcTyped.provinces)) {
+      if (provName.toLowerCase() === parentLower) continue;
+      const provInfo = psgcTyped.provinces[provName];
+      const match = provInfo.lgus.find((l) => {
+        const lLower = l.toLowerCase();
+        if (lLower === placeLower) return false;
+        if (ourLgus.has(lLower)) return false;
+        if (l.length < 4) return false;
+        return new RegExp(`\\b${lLower}\\b`, 'i').test(lower);
+      });
+      if (match && !hasOurAffirmation) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
 
 export type Reason =
   | { kind: 'office'; label: string }
@@ -109,6 +194,10 @@ export async function resolveScope(client: Client, config: PortalConfig): Promis
         if (normalizedExcludeTerms.some((term) => titleLower.includes(term))) {
           return false;
         }
+      }
+      // 4. Place title boundary filter (for place queries)
+      if (job.kind === 'place' && r.title && !isProjectForScope(r.title, config, job.label)) {
+        return false;
       }
       return true;
     });
