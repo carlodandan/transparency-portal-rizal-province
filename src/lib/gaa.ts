@@ -22,6 +22,119 @@ import type { Exclusion, PortalConfig } from '../config';
 import type { Client } from '../api/client';
 import type { GaaDepartment, GaaProgram } from '../api/types';
 import { GAA_YEARS } from '../api/types';
+import psgc from '../data/psgc.json';
+
+interface PsgcProvince {
+  name: string;
+  code: string;
+  region_key: string;
+  cities: string[];
+  municipalities: string[];
+  lgus: string[];
+}
+
+interface PsgcData {
+  provinces: Record<string, PsgcProvince>;
+  namesakeTowns: Record<string, string[]>;
+}
+
+const psgcTyped = psgc as PsgcData;
+
+const NCR_CITIES = [
+  'manila', 'taguig', 'pasig', 'makati', 'quezon city', 'caloocan', 'valenzuela',
+  'marikina', 'las piñas', 'muntinlupa', 'parañaque', 'pasay', 'mandaluyong',
+  'navotas', 'malabon', 'pateros'
+];
+
+export function isGaaProgramForScope(title: string, config: PortalConfig, placeLabel: string): boolean {
+  const lower = title.toLowerCase();
+
+  // 1. Exclude terms (e.g. "memorial", "sports complex", "shrine", "high school", "rizal park")
+  const excludeTerms = (config.scope.excludeTerms ?? []).map((t) => t.toLowerCase().trim()).filter(Boolean);
+  if (excludeTerms.some((t) => lower.includes(t))) {
+    return false;
+  }
+
+  // 2. Province scope:
+  // Check if portal is a province, or if the placeLabel matches a known province
+  const pKey = Object.keys(psgcTyped.provinces).find(
+    (k) =>
+      k.toLowerCase() === config.name.toLowerCase() ||
+      k.toLowerCase() === config.shortName?.toLowerCase() ||
+      k.toLowerCase() === placeLabel.toLowerCase() ||
+      `province of ${k.toLowerCase()}` === config.name.toLowerCase()
+  );
+
+  if (pKey) {
+    const prov = psgcTyped.provinces[pKey];
+    const provNameLower = pKey.toLowerCase();
+    const provLgus = new Set<string>();
+    if (prov) {
+      for (const l of prov.lgus) {
+        provLgus.add(l.toLowerCase());
+        if (l.toLowerCase() === 'rodriguez') provLgus.add('montalban');
+        if (l.toLowerCase() === 'jala-jala') provLgus.add('jalajala');
+        if (l.toLowerCase() === 'jalajala') provLgus.add('jala-jala');
+      }
+    }
+
+    const otherProvinces = Object.keys(psgcTyped.provinces)
+      .filter((k) => k.toLowerCase() !== provNameLower)
+      .map((k) => k.toLowerCase());
+
+    const isForeignWord = (word: string) => {
+      if (word === provNameLower) return false;
+      const regex = new RegExp(`\\b${word}\\b`, 'i');
+      return regex.test(lower);
+    };
+
+    const foreignProv = otherProvinces.find(isForeignWord);
+    const foreignNcr = provNameLower !== 'metro manila' ? NCR_CITIES.find(isForeignWord) : null;
+    const foreignPlace = foreignProv || foreignNcr;
+
+    const hasProvLgu = [...provLgus].some((lgu) => new RegExp(`\\b${lgu}\\b`, 'i').test(lower));
+    const provRegex = new RegExp(`(,\\s*${provNameLower}|\\bprovince of ${provNameLower}\\b|\\b${provNameLower} province\\b|\\bdeo.*${provNameLower}\\b)`, 'i');
+    const hasProvSuffix = provRegex.test(lower);
+
+    if (foreignPlace) {
+      if (!hasProvLgu || !hasProvSuffix) {
+        return false;
+      }
+      if (foreignProv && new RegExp(`(,\\s*${foreignProv}|\\bprovince of ${foreignProv}\\b)`, 'i').test(lower)) {
+        return false;
+      }
+    }
+
+    // Must not be just a street, avenue, or barangay named after the province/hero in another town
+    const isJustStreetOrBrgy =
+      new RegExp(`\\b(brgy|barangay|st|street|ave|avenue|dr|road|rd)\\.?\\s+${provNameLower}\\b`, 'i').test(lower) &&
+      !hasProvSuffix &&
+      !hasProvLgu;
+
+    if (isJustStreetOrBrgy) {
+      return false;
+    }
+
+    return hasProvLgu || hasProvSuffix;
+  }
+
+  // 3. Municipality / City scope with namesakes:
+  const namesakes = psgcTyped.namesakeTowns[placeLabel.toLowerCase()];
+  if (namesakes && namesakes.length > 1) {
+    const parentProv = Object.keys(psgcTyped.provinces).find((p) => {
+      const pInfo = psgcTyped.provinces[p];
+      return pInfo.lgus.some((l) => l.toLowerCase() === placeLabel.toLowerCase());
+    });
+    if (parentProv) {
+      const otherNamesakeProvs = namesakes.filter((p) => p.toLowerCase() !== parentProv.toLowerCase());
+      if (otherNamesakeProvs.some((op) => new RegExp(`\\b${op}\\b`, 'i').test(lower))) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
 
 export interface GaaRow extends GaaProgram {
   /** `gaa:<fam_key>`, the key exclusions use. */
@@ -65,7 +178,7 @@ const cache = new Map<string, Promise<GaaResult>>();
 
 /** Memoised per API host and places, so leaving and reopening the page does not search again. */
 export function loadGaa(client: Client, config: PortalConfig, onProgress?: (done: number, total: number) => void): Promise<GaaResult> {
-  const key = JSON.stringify([client.base, config.scope.places ?? [], config.scope.exclude ?? []]);
+  const key = JSON.stringify([client.base, config.scope.places ?? [], config.scope.exclude ?? [], config.scope.excludeTerms ?? []]);
   let hit = cache.get(key);
   if (!hit) {
     hit = resolveGaa(client, config, onProgress);
@@ -76,7 +189,8 @@ export function loadGaa(client: Client, config: PortalConfig, onProgress?: (done
 }
 
 export async function resolveGaa(client: Client, config: PortalConfig, onProgress?: (done: number, total: number) => void): Promise<GaaResult> {
-  const places = config.scope.places ?? [];
+  // Only search GAA for places where gaa is not explicitly false
+  const places = (config.scope.places ?? []).filter((p) => p.gaa !== false);
   const departments = (await client.gaaDepartments()).data;
   const jobs = places.flatMap((p) => departments.map((d) => ({ place: p.label, q: p.q ?? p.label, department: d })));
 
@@ -99,6 +213,8 @@ export async function resolveGaa(client: Client, config: PortalConfig, onProgres
   const queries: GaaQuery[] = [];
   jobs.forEach((j, i) => {
     const { first, rows, truncated } = results[i];
+    const filteredRows = rows.filter((r) => isGaaProgramForScope(r.name || r.fam_key || '', config, j.place));
+
     const matched = first.meta.matched ?? rows.length;
     if (!matched) return;
     queries.push({
@@ -107,11 +223,11 @@ export async function resolveGaa(client: Client, config: PortalConfig, onProgres
       department_id: j.department.id,
       department: j.department.description,
       matched,
-      fetched: rows.length,
+      fetched: filteredRows.length,
       truncated,
       api: client.href(`/api/v1/gaa/departments/${j.department.id}/programs`, { q: j.q }),
     });
-    for (const r of rows) {
+    for (const r of filteredRows) {
       const key = gaaKey(r.fam_key);
       const seen = byKey.get(key);
       if (!seen) byKey.set(key, { ...r, key, department: j.department.description, reasons: [j.place] });

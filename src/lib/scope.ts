@@ -34,7 +34,7 @@ export interface QueryReport {
   region?: string;
   /** Rows the API returned. */
   total: number;
-  /** Rows kept (after the region rule). */
+  /** Rows kept (after the region and boundary rules). */
   kept: number;
   truncated: boolean;
   /** The API request, for anyone who wants to check the list. */
@@ -54,7 +54,9 @@ export interface ScopeResult {
 export const projectKey = (dataset: string, id: string) => `${dataset}:${id}`;
 
 export async function resolveScope(client: Client, config: PortalConfig): Promise<ScopeResult> {
-  const { offices = [], places = [] } = config.scope;
+  const { offices = [], places = [], excludeTerms = [] } = config.scope;
+  const knownOffices = new Set(offices);
+  const normalizedExcludeTerms = excludeTerms.map((t) => t.toLowerCase().trim()).filter(Boolean);
   const exclude = (config.scope.exclude ?? []).filter((e) => !e.key.startsWith('gaa:'));
 
   type Job = { kind: Reason['kind']; label: string; dataset: DatasetKey; params: Params; region?: string };
@@ -83,7 +85,34 @@ export async function resolveScope(client: Client, config: PortalConfig): Promis
 
   for (const [i, job] of jobs.entries()) {
     const { list, rows: fetched, truncated } = results[i];
-    const rows = job.region ? fetched.filter((r) => r.region_key == null || r.region_key === job.region) : fetched;
+    const rows = fetched.filter((r) => {
+      // 1. Region filter: if specified, keep rows matching region or rows with no region given
+      if (job.region && r.region_key != null && r.region_key !== job.region) {
+        return false;
+      }
+      // 2. DPWH DEO boundary filter:
+      // If a DPWH project is returned by a place search and the portal defines offices,
+      // drop rows assigned to an office outside known offices (unless Central/Regional Office).
+      if (
+        job.kind === 'place' &&
+        job.dataset === 'dpwh' &&
+        knownOffices.size > 0 &&
+        r.office &&
+        !knownOffices.has(r.office) &&
+        !/central office|regional office/i.test(r.office)
+      ) {
+        return false;
+      }
+      // 3. Negative keyword filtering (excludeTerms)
+      if (normalizedExcludeTerms.length > 0 && r.title) {
+        const titleLower = r.title.toLowerCase();
+        if (normalizedExcludeTerms.some((term) => titleLower.includes(term))) {
+          return false;
+        }
+      }
+      return true;
+    });
+
     meta ??= list.meta;
     for (const d of list.disclaimers) if (!disclaimers.has(d.id)) disclaimers.set(d.id, d);
     queries.push({

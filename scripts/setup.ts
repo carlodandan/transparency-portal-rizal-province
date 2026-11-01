@@ -1,6 +1,7 @@
 /**
  * `pnpm run setup` — writes portal.config.ts for one LGU or DPWH district
- * engineering office, using the live API to find exact names and ids.
+ * engineering office, using the live API and local PSGC geographic data to
+ * find exact names, constituent LGUs, and legislative districts.
  *
  *   pnpm run setup                     interactive
  *   pnpm run setup -- --list-offices   every DPWH office, named as published (scope.offices)
@@ -16,7 +17,23 @@ import { stdin, stdout, argv, cwd, env, exit } from 'node:process';
 import { createClient } from '../src/api/client.ts';
 import type { DistrictCard } from '../src/api/types.ts';
 import { DEFAULT_API, type PlaceQuery, type PortalConfig, type PortalKind } from '../src/config.ts';
+import psgc from '../src/data/psgc.json';
 
+interface PsgcProvince {
+  name: string;
+  code: string;
+  region_key: string;
+  cities: string[];
+  municipalities: string[];
+  lgus: string[];
+}
+
+interface PsgcData {
+  provinces: Record<string, PsgcProvince>;
+  namesakeTowns: Record<string, string[]>;
+}
+
+const psgcTyped = psgc as PsgcData;
 const api = createClient(env.VITE_API_BASE || DEFAULT_API);
 // --out=path writes somewhere else (to try it without touching your config).
 const OUT = resolve(argv.find((a) => a.startsWith('--out='))?.slice('--out='.length) ?? resolve(import.meta.dirname, '..', 'portal.config.ts'));
@@ -140,6 +157,7 @@ async function main() {
   let scopeOffices: string[] = [];
   let places: PlaceQuery[] = [];
   let districtIds: string[] = [];
+  let excludeTerms: string[] = [];
 
   if (kind === 'deo') {
     let matches: OfficeChoice[] = [];
@@ -154,54 +172,107 @@ async function main() {
     shortName = office.name;
     scopeOffices = [printed];
     districtIds = office.districts.map((d) => d.id);
+  } else if (kind === 'province') {
+    let provinceName = '';
+    for (;;) {
+      provinceName = await ask('Province name (e.g. "Rizal", "Bohol", "Iloilo"):');
+      if (provinceName) break;
+    }
+
+    // Match with PSGC data if available
+    const psgcKey = Object.keys(psgcTyped.provinces).find((k) => k.toLowerCase() === provinceName.toLowerCase());
+    const psgcProv = psgcKey ? psgcTyped.provinces[psgcKey] : null;
+
+    if (psgcProv) {
+      console.log(`\nFound ${psgcKey} in PSGC: Region ${psgcProv.region_key}, ${psgcProv.cities.length} city(ies), ${psgcProv.municipalities.length} municipality(ies).`);
+    }
+
+    // Find all legislative districts belonging to the province OR its component cities
+    const targetJurisdictions = new Set<string>();
+    targetJurisdictions.add(provinceName.toLowerCase());
+    targetJurisdictions.add(`${provinceName.toLowerCase()} province`);
+    if (psgcProv) {
+      for (const c of psgcProv.cities) {
+        targetJurisdictions.add(c.toLowerCase());
+        targetJurisdictions.add(`${c.toLowerCase()} city`);
+        targetJurisdictions.add(`city of ${c.toLowerCase()}`);
+      }
+    }
+
+    const mine = districts.filter((d) => targetJurisdictions.has(d.jurisdiction.toLowerCase()));
+    districtIds = mine.map((d) => d.id);
+    const mineOffices = officesOf(mine);
+
+    console.log(`${provinceName}: ${mine.length} legislative district(s), DPWH offices: ${mineOffices.map((o) => o.name).join(', ') || 'none listed'}.`);
+    const shared = mineOffices.filter((o) => o.districts.length !== offices.find((x) => x.id === o.id)?.districts.length);
+    scopeOffices = await Promise.all(mineOffices.map((o) => printedOfficeName(o.id, o.districts[0].id)));
+    if (shared.length) console.log(`  Note: ${shared.map((o) => o.name).join(', ')} also serve(s) districts outside ${provinceName}; their lines are listed whole.`);
+
+    const regionKey = psgcProv?.region_key ?? mine[0]?.region_key ?? undefined;
+
+    // Provincial place query (the scoping engine filters non-local lines automatically using PSGC constituent LGUs)
+    places = [
+      {
+        label: psgcKey || provinceName,
+        q: psgcKey || provinceName,
+        region: regionKey,
+      },
+    ];
+
+    // Default excludeTerms for provinces named after national heroes / historical figures
+    if (/^(rizal|quezon|quirino|magsaysay)$/i.test(provinceName)) {
+      excludeTerms = ['Memorial', 'Sports Complex', 'Shrine', 'High School', 'Rizal Park', 'State University'];
+      console.log(`  Applied standard excludeTerms for hero-named province: ${excludeTerms.join(', ')}`);
+    }
+
+    name = `Province of ${psgcKey || provinceName}`;
+    shortName = psgcKey || provinceName;
   } else {
-    const jurisdictions = [...new Set(districts.map((d) => d.jurisdiction))].sort();
+    // City or Municipality
     let place = '';
     for (;;) {
-      place = await ask(kind === 'province' ? 'Province name:' : kind === 'city' ? 'City name (e.g. "Quezon City", "Tagbilaran"):' : 'Municipality name:');
+      place = await ask(kind === 'city' ? 'City name (e.g. "Antipolo", "Quezon City"):' : 'Municipality name (e.g. "Morong", "Cainta"):');
       if (place) break;
     }
-    const own = jurisdictions.filter((j) => j.toLowerCase() === place.toLowerCase() || j.toLowerCase() === `${place.toLowerCase()} city`);
 
-    if (own.length && kind !== 'municipality') {
-      // A province or a city with its own legislative districts: its DPWH offices
-      // and every line whose title names it.
-      const jurisdiction = own[0];
-      const mine = districts.filter((d) => d.jurisdiction === jurisdiction);
-      districtIds = mine.map((d) => d.id);
-      const mineOffices = officesOf(mine);
-      console.log(`\n${jurisdiction}: ${mine.length} legislative district(s), DPWH offices ${mineOffices.map((o) => o.name).join(', ') || 'none listed'}.`);
-      const shared = mineOffices.filter((o) => o.districts.length !== offices.find((x) => x.id === o.id)?.districts.length);
-      scopeOffices = await Promise.all(mineOffices.map((o) => printedOfficeName(o.id, o.districts[0].id)));
-      if (shared.length) console.log(`  Note: ${shared.map((o) => o.name).join(', ')} also serve(s) districts outside ${jurisdiction}; their lines are listed whole.`);
-      const term = jurisdiction.replace(/ City$/, '');
-      places = [{ label: jurisdiction, q: term, region: mine[0].region_key ?? undefined }];
-      name = kind === 'province' ? `Province of ${jurisdiction}` : jurisdiction;
-      shortName = jurisdiction;
-    } else {
-      // A component city or a municipality: lines whose title names it, kept to
-      // its province's region; the legislative district it sits in for the card.
-      const province = await ask('Province it is in:');
-      const provDistricts = districts.filter((d) => d.jurisdiction.toLowerCase() === province.toLowerCase());
-      const region = provDistricts[0]?.region_key ?? undefined;
-      const candidates: PlaceQuery[] = [
-        { label: place, q: place, region },
-        { label: place, q: `${place} ${province}`, region },
-      ];
-      console.log('\nChecking how many project titles name it…');
-      for (const c of candidates) {
-        const counts = await countPlace(c);
-        console.log(`  q="${c.q}"${region ? ` region=${region}` : ''}: ${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ')}`);
-      }
-      const which = await ask('Use (1) the name alone, or (2) the name with the province (fewer false matches, may miss titles without the province)?', '1');
-      places = [candidates[which === '2' ? 1 : 0]];
-      if (provDistricts.length) {
-        const d = await pick(provDistricts, (x) => x.label, 'legislative district is it in');
-        districtIds = [d.id];
-      }
-      name = kind === 'city' ? (/(^city of | city$)/i.test(place) ? place : `${place} City`) : `Municipality of ${place}`;
-      shortName = place;
+    const namesakes = psgcTyped.namesakeTowns[place.toLowerCase()];
+    if (namesakes && namesakes.length > 1) {
+      console.log(`\nNotice: "${place}" exists in multiple provinces: ${namesakes.join(', ')}.`);
     }
+
+    const province = await ask('Province it is in:');
+    const psgcKey = Object.keys(psgcTyped.provinces).find((k) => k.toLowerCase() === province.toLowerCase());
+    const psgcProv = psgcKey ? psgcTyped.provinces[psgcKey] : null;
+
+    const provDistricts = districts.filter((d) => {
+      const j = d.jurisdiction.toLowerCase();
+      return j === province.toLowerCase() || j === place.toLowerCase() || j === `${place.toLowerCase()} city`;
+    });
+    const region = psgcProv?.region_key ?? provDistricts[0]?.region_key ?? undefined;
+
+    const useQualified = namesakes && namesakes.length > 1;
+
+    const candidates: PlaceQuery[] = [
+      { label: place, q: place, region },
+      { label: place, q: `${place} ${province}`, region },
+    ];
+
+    console.log('\nChecking how many project titles name it…');
+    for (const c of candidates) {
+      const counts = await countPlace(c);
+      console.log(`  q="${c.q}"${region ? ` region=${region}` : ''}: ${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+    }
+
+    const which = await ask(`Use (1) "${place}" alone, or (2) "${place} ${province}" (recommended to avoid false matches)?`, useQualified ? '2' : '1');
+    places = [candidates[which === '2' ? 1 : 0]];
+
+    if (provDistricts.length) {
+      const d = await pick(provDistricts, (x) => x.label, 'legislative district is it in');
+      districtIds = [d.id];
+    }
+
+    name = kind === 'city' ? (/(^city of | city$)/i.test(place) ? place : `${place} City`) : `Municipality of ${place}`;
+    shortName = place;
   }
 
   name = await ask('Portal name:', name);
@@ -221,6 +292,7 @@ async function main() {
       places,
       districts: districtIds,
       exclude: [],
+      ...(excludeTerms.length ? { excludeTerms } : {}),
     },
     reporting: { enabled: false },
   };

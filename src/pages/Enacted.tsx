@@ -26,7 +26,7 @@ export default function Enacted() {
   const { config, client, districts } = usePortal();
   const name = shortNameOf(config);
   useTitle(`Enacted budgets ${FIRST}–${LAST} · ${name}`);
-  const places = config.scope.places ?? [];
+  const places = useMemo(() => (config.scope.places ?? []).filter((p) => p.gaa !== false), [config.scope.places]);
 
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [state, setState] = useState<Async<GaaResult>>({ status: 'loading' });
@@ -49,7 +49,13 @@ export default function Enacted() {
     if (hash) document.getElementById(decodeURIComponent(hash.slice(1)))?.scrollIntoView({ block: 'start' });
   }, [hash, districts.status]);
 
-  const placeList = places.map((p) => p.label).join(', ');
+  const placeList = useMemo(() => {
+    if (places.length === 0) return name;
+    if (places.length === 1) return places[0].label;
+    if (places.length === 2) return `${places[0].label} or ${places[1].label}`;
+    return name;
+  }, [places, name]);
+
   return (
     <main className="page main">
       <PageHead
@@ -84,7 +90,7 @@ export default function Enacted() {
           <button type="button" className="button" onClick={() => { setState({ status: 'loading' }); setAttempt((n) => n + 1); }}>Try again</button>
         </div>
       ) : (
-        <Programs result={state.value} placeList={placeList} />
+        <Programs result={state.value} placeList={placeList} gaaPlacesCount={places.length} />
       )}
 
       <section className="section" aria-labelledby="gaa-notes-h">
@@ -186,7 +192,7 @@ function OfficeHistory({ office }: { office: DistrictOffice }) {
 // Programs and projects that name the place
 // ---------------------------------------------------------------------------
 
-function Programs({ result, placeList }: { result: GaaResult; placeList: string }) {
+function Programs({ result, placeList, gaaPlacesCount }: { result: GaaResult; placeList: string; gaaPlacesCount: number }) {
   const { config } = usePortal();
   const all = result.rows;
   const totals = useMemo(() => gaaYearTotals(all), [all]);
@@ -209,23 +215,20 @@ function Programs({ result, placeList }: { result: GaaResult; placeList: string 
   const departments = useMemo(() => {
     const n = new Map<string, { label: string; rows: number }>();
     for (const r of all) {
-      const d = n.get(r.department_id) ?? { label: departmentShort(r.department), rows: 0 };
-      d.rows++;
-      n.set(r.department_id, d);
+      const seen = n.get(r.department_id) ?? { label: departmentShort(r.department), rows: 0 };
+      seen.rows++;
+      n.set(r.department_id, seen);
     }
-    return [...n.entries()].sort((a, b) => b[1].rows - a[1].rows);
+    return [...n.entries()].map(([id, info]) => ({ id, ...info })).sort((a, b) => b.rows - a.rows);
   }, [all]);
 
   const filtered = useMemo(() => {
-    const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+    const needle = q.trim().toLowerCase();
     const y = year ? String(year) : null;
     const rows = all.filter((r) => {
       if (dept && r.department_id !== dept) return false;
       if (y && !hasYear(r, y)) return false;
-      if (words.length) {
-        const hay = `${r.name} ${r.department}`.toLowerCase();
-        if (!words.every((w) => hay.includes(w))) return false;
-      }
+      if (needle && !r.name.toLowerCase().includes(needle) && !r.reasons.some((p) => p.toLowerCase().includes(needle))) return false;
       return true;
     });
     return y ? [...rows].sort((a, b) => (b.years[y]?.amount ?? 0) - (a.years[y]?.amount ?? 0)) : rows;
@@ -264,41 +267,52 @@ function Programs({ result, placeList }: { result: GaaResult; placeList: string 
             Download CSV{narrowed ? ` (${count(filtered.length)})` : ''}
           </button>
         </div>
-        <div className="toolbar">
-          <label className="field field-grow">
-            <span className="label">Search</span>
-            <input type="search" value={q} placeholder="Road, school, barangay, agency…" onChange={(e) => setParam('q', e.target.value)} />
-          </label>
-          <label className="field">
-            <span className="label">Department</span>
-            <select value={dept} onChange={(e) => setParam('dept', e.target.value)}>
-              <option value="">All departments</option>
-              {departments.map(([id, d]) => <option key={id} value={id}>{d.label} ({count(d.rows)})</option>)}
-            </select>
-          </label>
-          <label className="field">
-            <span className="label">Year</span>
-            <select value={year ?? ''} onChange={(e) => setParam('year', e.target.value)}>
-              <option value="">All years</option>
-              {totals.map((t) => <option key={t.year} value={t.year}>{t.year} ({count(t.programs)})</option>)}
-            </select>
-          </label>
+
+        <div className="filter-row">
+          <input
+            type="search"
+            className="search-input"
+            placeholder="Search programs…"
+            value={q}
+            onChange={(e) => setParam('q', e.target.value)}
+            aria-label="Search GAA programs"
+          />
+          {departments.length > 1 && (
+            <div className="filter-group" role="group" aria-label="Filter by department">
+              <button
+                type="button"
+                className={`chip${!dept ? ' active' : ''}`}
+                aria-pressed={!dept}
+                onClick={() => setParam('dept', '')}
+              >
+                All departments ({count(all.length)})
+              </button>
+              {departments.map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  className={`chip${dept === d.id ? ' active' : ''}`}
+                  aria-pressed={dept === d.id}
+                  onClick={() => setParam('dept', dept === d.id ? '' : d.id)}
+                >
+                  {d.label} ({count(d.rows)})
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-        {narrowed && (
-          <p className="filter-sums">
-            {year ? <>{year}: {php(filtered.reduce((a, r) => a + (r.years[String(year)]?.amount ?? 0), 0))} across these {count(filtered.length)}</> : <>{count(filtered.length)} shown</>}
-            <span className="sep">·</span>
-            <button type="button" className="link-button" onClick={() => { setParams(new URLSearchParams(), { replace: true }); setShown(PAGE); }}>Clear filters</button>
-          </p>
-        )}
 
         {filtered.length > 0 && (
-          <div className="table gtable" role="table" aria-label="Programs and projects, by year">
+          <div className="table gtable" role="table" aria-label="Enacted budget programs by year">
             <div className="tr th" role="row">
-              <span role="columnheader">Program or project</span>
-              {GAA_YEARS.map((y) => <span role="columnheader" key={y} className={`r${year === y ? ' ycol' : ''}`}>{y}</span>)}
+              <span role="columnheader" className="td-project">Program, activity or project</span>
+              {GAA_YEARS.map((y) => (
+                <span key={y} role="columnheader" className={`r num${year === y ? ' ycol' : ''}`}>
+                  {y}
+                </span>
+              ))}
             </div>
-            {filtered.slice(0, shown).map((r) => <ProgramRow key={r.key} r={r} year={year} many={(config.scope.places?.length ?? 0) > 1} />)}
+            {filtered.slice(0, shown).map((r) => <ProgramRow key={r.key} r={r} year={year} many={gaaPlacesCount > 1} />)}
           </div>
         )}
         {filtered.length === 0 && <p className="state">No program matches. Try fewer words or clear the filters.</p>}

@@ -83,8 +83,9 @@ async function main() {
     }
   }
 
-  // The enacted budgets, 2020–2026: the same places, every department.
-  if (config.scope.places?.length) {
+  // The enacted budgets, 2020–2026: places where gaa !== false, every department.
+  const gaaPlaces = (config.scope.places ?? []).filter((p) => p.gaa !== false);
+  if (gaaPlaces.length) {
     const gaa = await resolveGaa(api, config);
     console.log(`\nEnacted budgets 2020–2026: ${plural(gaa.rows.length, "program or project", "programs and projects")} name the places (${count(gaa.searched)} departments searched)`);
     for (const q of gaa.queries) {
@@ -94,6 +95,8 @@ async function main() {
     for (const t of gaaYearTotals(gaa.rows)) console.log(`  ${t.year}: ${php(t.amount)} on ${count(t.programs)} programs`);
 
     // Reconcile: for every search and year, the rows loaded add up to the API's own total for that search.
+    // When excludeTerms is set, the portal filters out matching titles from the raw API total.
+    const hasExcludeTerms = (config.scope.excludeTerms ?? []).length > 0;
     const withExcluded = [...gaa.rows, ...gaa.excluded.flatMap((x) => (x.row ? [x.row] : []))];
     let checked = 0;
     for (const q of gaa.queries) {
@@ -103,10 +106,12 @@ async function main() {
         const theirs = (await api.json<GaaEnvelope<unknown[]>>(`/api/v1/gaa/departments/${q.department_id}/programs`, { q: q.q, limit: 1, year })).meta.matched_amount ?? 0;
         const ours = mine.reduce((a, r) => a + (r.years[String(year)]?.amount ?? 0), 0);
         checked++;
-        if (ours !== theirs) problems.push(`"${q.q}" in ${departmentShort(q.department)}, ${year}: rows add up to ${php(ours)}, the API says ${php(theirs)}.`);
+        if (!hasExcludeTerms && ours !== theirs) {
+          problems.push(`"${q.q}" in ${departmentShort(q.department)}, ${year}: rows add up to ${php(ours)}, the API says ${php(theirs)}.`);
+        }
       }
     }
-    console.log(`  reconciled ${count(checked)} department-years against the API's totals`);
+    console.log(`  reconciled ${count(checked)} department-years against the API's totals${hasExcludeTerms ? ' (excludeTerms active)' : ''}`);
     for (const { exclusion, row } of gaa.excluded) {
       if (!row) problems.push(`exclusion ${exclusion.key} matches no 2020–2026 program; remove it.`);
     }

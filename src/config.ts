@@ -34,6 +34,8 @@ export interface PlaceQuery {
   region?: string;
   /** Programs to search. Defaults to all four. */
   datasets?: DatasetKey[];
+  /** Whether to search GAA (2020–2026) departments for this place. Defaults to true. Set false for sub-LGU queries. */
+  gaa?: boolean;
 }
 
 /** A line the maintainer removed from the portal. Every exclusion is published on the About page. */
@@ -81,6 +83,11 @@ export interface PortalConfig {
     districts?: string[];
     /** Lines removed by hand. Published, with reasons, on the About page. */
     exclude?: Exclusion[];
+    /**
+     * Substrings that drop matching project or program titles across 2027 and GAA.
+     * Useful for excluding hero monuments, sports complexes, shrines, or out-of-province facilities.
+     */
+    excludeTerms?: string[];
   };
   /**
    * Citizen reports go to one central service on budget.bettergov.ph (not
@@ -105,7 +112,7 @@ export function configProblems(config: PortalConfig): string[] {
   }
   if (!config.name.trim()) problems.push('name is empty.');
   if (!config.operator?.name?.trim()) problems.push('operator.name is empty: say who runs this portal.');
-  const { offices = [], places = [], districts = [], exclude = [] } = config.scope;
+  const { offices = [], places = [], districts = [], exclude = [], excludeTerms = [] } = config.scope;
   if (!offices.length && !places.length) {
     problems.push('scope needs at least one office or place, or the portal has no projects.');
   }
@@ -121,6 +128,9 @@ export function configProblems(config: PortalConfig): string[] {
   for (const e of exclude) {
     if (!/^(dpwh|fmr|hfep|nia|gaa):.+/.test(e.key)) problems.push(`exclusion "${e.key}" should be "<program>:<id>" (2027) or "gaa:<family key>" (2020–2026).`);
     if (!e.reason.trim()) problems.push(`exclusion "${e.key}" needs a reason; readers see it.`);
+  }
+  for (const t of excludeTerms) {
+    if (!t.trim()) problems.push('excludeTerms contains an empty string.');
   }
   return problems;
 }
