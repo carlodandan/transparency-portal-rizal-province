@@ -81,7 +81,7 @@ const slug = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,
 
 /** The import path from the written file to src/config.ts. */
 const CONFIG_IMPORT = (() => {
-  const rel = relative(dirname(OUT), resolve(import.meta.dirname, '..', 'src', 'config')).replace(/\\/g, '/');
+  const rel = relative(dirname(OUT), resolve(import.meta.dirname, '..', 'src', 'config.ts')).replace(/\\/g, '/');
   return rel.startsWith('.') ? rel : `./${rel}`;
 })();
 
@@ -158,6 +158,7 @@ async function main() {
   let places: PlaceQuery[] = [];
   let districtIds: string[] = [];
   let excludeTerms: string[] = [];
+  let scopeProvince: string | undefined;
 
   if (kind === 'deo') {
     let matches: OfficeChoice[] = [];
@@ -243,6 +244,7 @@ async function main() {
     const province = await ask('Province it is in:');
     const psgcKey = Object.keys(psgcTyped.provinces).find((k) => k.toLowerCase() === province.toLowerCase());
     const psgcProv = psgcKey ? psgcTyped.provinces[psgcKey] : null;
+    scopeProvince = psgcKey || province;
 
     const provDistricts = districts.filter((d) => {
       const j = d.jurisdiction.toLowerCase();
@@ -250,21 +252,18 @@ async function main() {
     });
     const region = psgcProv?.region_key ?? provDistricts[0]?.region_key ?? undefined;
 
-    const useQualified = namesakes && namesakes.length > 1;
-
-    const candidates: PlaceQuery[] = [
-      { label: place, q: place, region },
-      { label: place, q: `${place} ${province}`, region },
+    places = [
+      {
+        label: place,
+        q: place,
+        region,
+        province: scopeProvince,
+      },
     ];
 
     console.log('\nChecking how many project titles name it…');
-    for (const c of candidates) {
-      const counts = await countPlace(c);
-      console.log(`  q="${c.q}"${region ? ` region=${region}` : ''}: ${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ')}`);
-    }
-
-    const which = await ask(`Use (1) "${place}" alone, or (2) "${place} ${province}" (recommended to avoid false matches)?`, useQualified ? '2' : '1');
-    places = [candidates[which === '2' ? 1 : 0]];
+    const counts = await countPlace(places[0]);
+    console.log(`  q="${places[0].q}"${region ? ` region=${region}` : ''}: ${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ')}`);
 
     if (provDistricts.length) {
       const d = await pick(provDistricts, (x) => x.label, 'legislative district is it in');
@@ -288,6 +287,7 @@ async function main() {
     shortName,
     operator: { name: operator },
     scope: {
+      ...(scopeProvince ? { province: scopeProvince } : {}),
       offices: scopeOffices,
       places,
       districts: districtIds,

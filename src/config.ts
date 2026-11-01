@@ -32,6 +32,8 @@ export interface PlaceQuery {
   q?: string;
   /** A region key ("VII", "NCR", "IV-A") to keep a common name to one region. */
   region?: string;
+  /** The parent province (e.g. "Rizal", "Bataan"). Disambiguates namesake towns. */
+  province?: string;
   /** Programs to search. Defaults to all four. */
   datasets?: DatasetKey[];
   /** Whether to search GAA (2020–2026) departments for this place. Defaults to true. Set false for sub-LGU queries. */
@@ -68,6 +70,8 @@ export interface PortalConfig {
   /** Budget API host. Default https://budget.bettergov.ph. VITE_API_BASE overrides it. */
   api?: string;
   scope: {
+    /** The parent province for municipal or city portals (e.g. "Rizal", "Bohol"). */
+    province?: string;
     /**
      * DPWH offices, named exactly as the documents publish them
      * ("Bohol 1st District Engineering Office"). Every DPWH line listed under

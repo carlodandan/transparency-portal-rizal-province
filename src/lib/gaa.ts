@@ -46,8 +46,48 @@ const NCR_CITIES = [
   'navotas', 'malabon', 'pateros'
 ];
 
+export function resolveParentProvince(placeLabel: string, config: PortalConfig): string | null {
+  const p = config.scope.places?.find((pl) => pl.label.toLowerCase() === placeLabel.toLowerCase());
+  if (p?.province) return p.province;
+  if (config.scope.province) return config.scope.province;
+
+  // Check if portal is a province
+  const provKey = Object.keys(psgcTyped.provinces).find(
+    (k) =>
+      k.toLowerCase() === config.name.toLowerCase() ||
+      k.toLowerCase() === config.shortName?.toLowerCase() ||
+      k.toLowerCase() === placeLabel.toLowerCase() ||
+      `province of ${k.toLowerCase()}` === config.name.toLowerCase()
+  );
+  if (provKey) return provKey;
+
+  // For a city / municipality, find candidate provinces that contain this LGU in PSGC
+  const candidates = Object.keys(psgcTyped.provinces).filter((provName) => {
+    return psgcTyped.provinces[provName].lgus.some((l) => l.toLowerCase() === placeLabel.toLowerCase());
+  });
+
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0];
+
+  // Disambiguate using region, offices, or legislative districts
+  const region = p?.region;
+  const officeStr = (config.scope.offices || []).join(' ').toLowerCase();
+  const districtStr = (config.scope.districts || []).join(' ').toLowerCase();
+
+  const matched = candidates.find((provName) => {
+    const provInfo = psgcTyped.provinces[provName];
+    if (region && provInfo.region_key.toLowerCase() === region.toLowerCase()) return true;
+    if (officeStr.includes(provName.toLowerCase())) return true;
+    if (districtStr.includes(provName.toLowerCase())) return true;
+    return false;
+  });
+
+  return matched || candidates[0];
+}
+
 export function isGaaProgramForScope(title: string, config: PortalConfig, placeLabel: string): boolean {
   const lower = title.toLowerCase();
+  const placeLower = placeLabel.toLowerCase();
 
   // 1. Exclude terms (e.g. "memorial", "sports complex", "shrine", "high school", "rizal park")
   const excludeTerms = (config.scope.excludeTerms ?? []).map((t) => t.toLowerCase().trim()).filter(Boolean);
@@ -55,7 +95,13 @@ export function isGaaProgramForScope(title: string, config: PortalConfig, placeL
     return false;
   }
 
-  // 2. Province scope:
+  // 2. Must contain the place as a distinct word
+  const wordRegex = new RegExp(`\\b${placeLower}\\b`, 'i');
+  if (!wordRegex.test(lower)) {
+    return false;
+  }
+
+  // 3. Province scope:
   // Check if portal is a province, or if the placeLabel matches a known province
   const pKey = Object.keys(psgcTyped.provinces).find(
     (k) =>
@@ -118,18 +164,54 @@ export function isGaaProgramForScope(title: string, config: PortalConfig, placeL
     return hasProvLgu || hasProvSuffix;
   }
 
-  // 3. Municipality / City scope with namesakes:
-  const namesakes = psgcTyped.namesakeTowns[placeLabel.toLowerCase()];
-  if (namesakes && namesakes.length > 1) {
-    const parentProv = Object.keys(psgcTyped.provinces).find((p) => {
-      const pInfo = psgcTyped.provinces[p];
-      return pInfo.lgus.some((l) => l.toLowerCase() === placeLabel.toLowerCase());
-    });
-    if (parentProv) {
-      const otherNamesakeProvs = namesakes.filter((p) => p.toLowerCase() !== parentProv.toLowerCase());
-      if (otherNamesakeProvs.some((op) => new RegExp(`\\b${op}\\b`, 'i').test(lower))) {
+  // 4. Municipality / City scope:
+  const parent = resolveParentProvince(placeLabel, config);
+  if (parent) {
+    const parentLower = parent.toLowerCase();
+
+    // A. Namesakes in other province
+    const namesakes = psgcTyped.namesakeTowns[placeLower];
+    if (namesakes && namesakes.length > 1) {
+      const otherNamesakeProvs = namesakes
+        .filter((p) => p.toLowerCase() !== parentLower)
+        .map((p) => p.toLowerCase());
+
+      const hasOtherProv = otherNamesakeProvs.some((op) => new RegExp(`\\b${op}\\b`, 'i').test(lower));
+      const hasOurProv = new RegExp(`\\b${parentLower}\\b`, 'i').test(lower);
+
+      if (hasOtherProv && !hasOurProv) {
         return false;
       }
+    }
+
+    // B. Foreign provinces or NCR cities
+    const otherProvinces = Object.keys(psgcTyped.provinces)
+      .filter((k) => k.toLowerCase() !== parentLower)
+      .map((k) => k.toLowerCase());
+
+    const isForeignWord = (word: string) => {
+      if (word === parentLower) return false;
+      return new RegExp(`\\b${word}\\b`, 'i').test(lower);
+    };
+
+    const foreignProv = otherProvinces.find(isForeignWord);
+    const foreignNcr = NCR_CITIES.find(isForeignWord);
+    const foreign = foreignProv || foreignNcr;
+
+    if (foreign) {
+      const hasOurProv = new RegExp(`(,\\s*${parentLower}|\\bprovince of ${parentLower}\\b|\\b${parentLower} province\\b)`, 'i').test(lower);
+      if (!hasOurProv) {
+        return false;
+      }
+    }
+
+    // C. Not just a street or barangay in another municipality
+    const isJustStreetOrBrgy =
+      new RegExp(`\\b(brgy|barangay|st|street|ave|avenue|dr|road|rd)\\.?\\s+${placeLower}\\b`, 'i').test(lower) &&
+      !new RegExp(`(,\\s*${placeLower}|\\bmunicipality of ${placeLower}\\b|\\bcity of ${placeLower}\\b)`, 'i').test(lower);
+
+    if (isJustStreetOrBrgy) {
+      return false;
     }
   }
 

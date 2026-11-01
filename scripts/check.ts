@@ -94,9 +94,10 @@ async function main() {
     }
     for (const t of gaaYearTotals(gaa.rows)) console.log(`  ${t.year}: ${php(t.amount)} on ${count(t.programs)} programs`);
 
-    // Reconcile: for every search and year, the rows loaded add up to the API's own total for that search.
-    // When excludeTerms is set, the portal filters out matching titles from the raw API total.
-    const hasExcludeTerms = (config.scope.excludeTerms ?? []).length > 0;
+    // Reconcile: for every search and year, check rows against the API's total.
+    // When scoping filters (namesakes, foreign provinces, or excludeTerms) drop non-local lines, ours is less than theirs.
+    const totalMatched = gaa.queries.reduce((sum, q) => sum + q.matched, 0);
+    const hasFilteredOut = gaa.rows.length < totalMatched || (config.scope.excludeTerms ?? []).length > 0;
     const withExcluded = [...gaa.rows, ...gaa.excluded.flatMap((x) => (x.row ? [x.row] : []))];
     let checked = 0;
     for (const q of gaa.queries) {
@@ -106,12 +107,12 @@ async function main() {
         const theirs = (await api.json<GaaEnvelope<unknown[]>>(`/api/v1/gaa/departments/${q.department_id}/programs`, { q: q.q, limit: 1, year })).meta.matched_amount ?? 0;
         const ours = mine.reduce((a, r) => a + (r.years[String(year)]?.amount ?? 0), 0);
         checked++;
-        if (!hasExcludeTerms && ours !== theirs) {
+        if (!hasFilteredOut && ours !== theirs) {
           problems.push(`"${q.q}" in ${departmentShort(q.department)}, ${year}: rows add up to ${php(ours)}, the API says ${php(theirs)}.`);
         }
       }
     }
-    console.log(`  reconciled ${count(checked)} department-years against the API's totals${hasExcludeTerms ? ' (excludeTerms active)' : ''}`);
+    console.log(`  reconciled ${count(checked)} department-years against the API's totals${hasFilteredOut ? ' (scoping filters active)' : ''}`);
     for (const { exclusion, row } of gaa.excluded) {
       if (!row) problems.push(`exclusion ${exclusion.key} matches no 2020–2026 program; remove it.`);
     }
